@@ -11,13 +11,22 @@ from curl_cffi import requests, CurlMime
 from websocket import WebSocketApp
 
 # FastAPI için gerekli kütüphaneler
-from fastapi import FastAPI, UploadFile, File, Form, BackgroundTasks
+from fastapi import FastAPI, UploadFile, File, Form, BackgroundTasks, Depends
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 from typing import List, Dict, Optional, Any
 from pydantic import BaseModel
 import base64
+import os
+
+# Veritabanı için eklemeler
+from sqlalchemy import create_engine, Column, String, JSON, Integer, Text, DateTime, ForeignKey
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker, Session, relationship
+from sqlalchemy.sql import func
+from contextlib import contextmanager
+import datetime
 
 try:
     from .emailnator import Emailnator
@@ -26,6 +35,50 @@ except ImportError:
     class Emailnator:
         pass
 
+# Veritabanı bağlantısını yapılandırma
+DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///./chats.db")
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+
+engine = create_engine(DATABASE_URL)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+# Veritabanı modelleri
+class Chat(Base):
+    __tablename__ = "chats"
+    
+    id = Column(String, primary_key=True, index=True)
+    backend_uuid = Column(String, index=True, nullable=True)
+    context_uuid = Column(String, index=True, nullable=True)
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+    
+    messages = relationship("Message", back_populates="chat", cascade="all, delete-orphan")
+
+class Message(Base):
+    __tablename__ = "messages"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    chat_id = Column(String, ForeignKey("chats.id"))
+    role = Column(String, index=True)  # "user" veya "assistant"
+    content = Column(Text)
+    files = Column(JSON, nullable=True)
+    created_at = Column(DateTime, server_default=func.now())
+    
+    chat = relationship("Chat", back_populates="messages")
+
+# Veritabanı tabloları oluştur
+Base.metadata.create_all(bind=engine)
+
+# Veritabanı bağlantı yöneticisi
+@contextmanager
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 
 class AsyncMixin:
     def __init__(self, *args, **kwargs):
@@ -316,6 +369,50 @@ class Client(AsyncMixin):
                 return chunks[-1]
 
 
+# Veritabanı işlemleri için yardımcı fonksiyonlar
+def get_chat_by_id(db: Session, chat_id: str):
+    return db.query(Chat).filter(Chat.id == chat_id).first()
+
+def create_chat(db: Session, chat_id: str, backend_uuid: str = None, context_uuid: str = None):
+    chat = Chat(id=chat_id, backend_uuid=backend_uuid, context_uuid=context_uuid)
+    db.add(chat)
+    db.commit()
+    db.refresh(chat)
+    return chat
+
+def add_message(db: Session, chat_id: str, role: str, content: str, files=None):
+    message = Message(chat_id=chat_id, role=role, content=content, files=files)
+    db.add(message)
+    db.commit()
+    db.refresh(message)
+    return message
+
+def update_chat(db: Session, chat_id: str, backend_uuid: str = None, context_uuid: str = None):
+    chat = get_chat_by_id(db, chat_id)
+    if chat:
+        if backend_uuid:
+            chat.backend_uuid = backend_uuid
+        if context_uuid:
+            chat.context_uuid = context_uuid
+        chat.updated_at = datetime.datetime.now()
+        db.commit()
+        db.refresh(chat)
+    return chat
+
+def delete_chat_by_id(db: Session, chat_id: str):
+    chat = get_chat_by_id(db, chat_id)
+    if chat:
+        db.delete(chat)
+        db.commit()
+        return True
+    return False
+
+def get_all_chats(db: Session, skip: int = 0, limit: int = 100):
+    return db.query(Chat).offset(skip).limit(limit).all()
+
+def get_chat_messages(db: Session, chat_id: str):
+    return db.query(Message).filter(Message.chat_id == chat_id).order_by(Message.created_at).all()
+
 # FastAPI modelleri
 class QueryRequest(BaseModel):
     query: str
@@ -327,6 +424,7 @@ class QueryRequest(BaseModel):
     stream: bool = False
     cookies: Dict[str, str] = {}
     headers: Dict[str, str] = {}
+    chat_id: Optional[str] = None  # Chat ID ekledik
 
 class FileData(BaseModel):
     filename: str
@@ -388,7 +486,7 @@ DEFAULT_HEADERS = {
 }
 
 # FastAPI uygulaması
-app = FastAPI(title="Perplexity API Server", description="Perplexity AI API'sine erişim sağlayan yerel API sunucusu")
+app = FastAPI(title="Perplexity API Server", description="Perplexity AI API'sine erişim sağlayan API sunucusu")
 
 # CORS ayarları
 app.add_middleware(
@@ -414,6 +512,11 @@ async def root():
                 "path": "/query_with_files",
                 "method": "POST",
                 "description": "Dosyalarla birlikte Perplexity'ye sorgu gönder"
+            },
+            {
+                "path": "/chats",
+                "method": "GET",
+                "description": "Mevcut sohbetleri listele"
             }
         ]
     }
@@ -429,6 +532,22 @@ async def query(request: QueryRequest):
         # Her istek için yeni bir client oluştur
         client = await Client(cookies=cookies_to_use, headers=headers_to_use)
         
+        # Chat ID kontrolü ve follow-up hazırlama
+        follow_up = None
+        
+        with get_db() as db:
+            # Eğer chat_id verilmişse
+            if request.chat_id:
+                # Veritabanından chat'i kontrol et
+                chat = get_chat_by_id(db, request.chat_id)
+                
+                if chat:
+                    # Var olan sohbeti devam ettir
+                    follow_up = {
+                        "backend_uuid": chat.backend_uuid,
+                        "attachments": []
+                    }
+        
         result = await client.search(
             query=request.query,
             mode=request.mode,
@@ -436,18 +555,101 @@ async def query(request: QueryRequest):
             sources=request.sources,
             language=request.language,
             incognito=request.incognito,
-            stream=request.stream
+            stream=request.stream,
+            follow_up=follow_up
         )
         
         # İşlem bittikten sonra websocket bağlantısını kapat
         if hasattr(client, 'ws') and client.ws:
             client.ws.close()
         
+        # Sonucu veritabanına kaydet
+        if request.chat_id and not request.stream:
+            with get_db() as db:
+                chat = get_chat_by_id(db, request.chat_id)
+                
+                if not chat:
+                    # Yeni sohbet oluştur
+                    chat = create_chat(
+                        db, 
+                        request.chat_id, 
+                        result.get("backend_uuid", None), 
+                        result.get("context_uuid", None)
+                    )
+                    # Kullanıcı mesajını ekle
+                    add_message(db, request.chat_id, "user", request.query)
+                    # Asistan mesajını ekle
+                    add_message(
+                        db, 
+                        request.chat_id, 
+                        "assistant", 
+                        result["text"]["answer"] if "text" in result and "answer" in result["text"] else ""
+                    )
+                else:
+                    # Mevcut sohbeti güncelle
+                    update_chat(
+                        db, 
+                        request.chat_id, 
+                        result.get("backend_uuid", None), 
+                        result.get("context_uuid", None)
+                    )
+                    # Kullanıcı mesajını ekle
+                    add_message(db, request.chat_id, "user", request.query)
+                    # Asistan mesajını ekle
+                    add_message(
+                        db, 
+                        request.chat_id, 
+                        "assistant", 
+                        result["text"]["answer"] if "text" in result and "answer" in result["text"] else ""
+                    )
+        
         if request.stream:
             # Streaming yanıt için
             async def generate():
+                last_chunk = None
                 async for chunk in result:
+                    last_chunk = chunk
                     yield json.dumps(chunk) + "\n"
+                
+                # Stream'in sonunda veritabanını güncelle
+                if request.chat_id and last_chunk:
+                    with get_db() as db:
+                        chat = get_chat_by_id(db, request.chat_id)
+                        
+                        if not chat:
+                            # Yeni sohbet oluştur
+                            chat = create_chat(
+                                db, 
+                                request.chat_id, 
+                                last_chunk.get("backend_uuid", None), 
+                                last_chunk.get("context_uuid", None)
+                            )
+                            # Kullanıcı mesajını ekle
+                            add_message(db, request.chat_id, "user", request.query)
+                            # Asistan mesajını ekle
+                            add_message(
+                                db, 
+                                request.chat_id, 
+                                "assistant", 
+                                last_chunk["text"]["answer"] if "text" in last_chunk and "answer" in last_chunk["text"] else ""
+                            )
+                        else:
+                            # Mevcut sohbeti güncelle
+                            update_chat(
+                                db, 
+                                request.chat_id, 
+                                last_chunk.get("backend_uuid", None), 
+                                last_chunk.get("context_uuid", None)
+                            )
+                            # Kullanıcı mesajını ekle
+                            add_message(db, request.chat_id, "user", request.query)
+                            # Asistan mesajını ekle
+                            add_message(
+                                db, 
+                                request.chat_id, 
+                                "assistant", 
+                                last_chunk["text"]["answer"] if "text" in last_chunk and "answer" in last_chunk["text"] else ""
+                            )
             
             return StreamingResponse(generate(), media_type="application/x-ndjson")
         else:
@@ -475,6 +677,22 @@ async def query_with_files(request: QueryRequestWithFiles):
             file_content = base64.b64decode(file_data.content)
             files[file_data.filename] = file_content
         
+        # Chat ID kontrolü ve follow-up hazırlama
+        follow_up = None
+        
+        with get_db() as db:
+            # Eğer chat_id verilmişse
+            if request.chat_id:
+                # Veritabanından chat'i kontrol et
+                chat = get_chat_by_id(db, request.chat_id)
+                
+                if chat:
+                    # Var olan sohbeti devam ettir
+                    follow_up = {
+                        "backend_uuid": chat.backend_uuid,
+                        "attachments": []
+                    }
+        
         result = await client.search(
             query=request.query,
             mode=request.mode,
@@ -483,18 +701,104 @@ async def query_with_files(request: QueryRequestWithFiles):
             language=request.language,
             incognito=request.incognito,
             stream=request.stream,
-            files=files
+            files=files,
+            follow_up=follow_up
         )
         
         # İşlem bittikten sonra websocket bağlantısını kapat
         if hasattr(client, 'ws') and client.ws:
             client.ws.close()
         
+        # Dosya adlarını JSON formatına dönüştür
+        file_names = [f.filename for f in request.files]
+        
+        # Sonucu veritabanına kaydet
+        if request.chat_id and not request.stream:
+            with get_db() as db:
+                chat = get_chat_by_id(db, request.chat_id)
+                
+                if not chat:
+                    # Yeni sohbet oluştur
+                    chat = create_chat(
+                        db, 
+                        request.chat_id, 
+                        result.get("backend_uuid", None), 
+                        result.get("context_uuid", None)
+                    )
+                    # Kullanıcı mesajını ekle
+                    add_message(db, request.chat_id, "user", request.query, file_names)
+                    # Asistan mesajını ekle
+                    add_message(
+                        db, 
+                        request.chat_id, 
+                        "assistant", 
+                        result["text"]["answer"] if "text" in result and "answer" in result["text"] else ""
+                    )
+                else:
+                    # Mevcut sohbeti güncelle
+                    update_chat(
+                        db, 
+                        request.chat_id, 
+                        result.get("backend_uuid", None), 
+                        result.get("context_uuid", None)
+                    )
+                    # Kullanıcı mesajını ekle
+                    add_message(db, request.chat_id, "user", request.query, file_names)
+                    # Asistan mesajını ekle
+                    add_message(
+                        db, 
+                        request.chat_id, 
+                        "assistant", 
+                        result["text"]["answer"] if "text" in result and "answer" in result["text"] else ""
+                    )
+        
         if request.stream:
             # Streaming yanıt için
             async def generate():
+                last_chunk = None
                 async for chunk in result:
+                    last_chunk = chunk
                     yield json.dumps(chunk) + "\n"
+                
+                # Stream'in sonunda veritabanını güncelle
+                if request.chat_id and last_chunk:
+                    with get_db() as db:
+                        chat = get_chat_by_id(db, request.chat_id)
+                        
+                        if not chat:
+                            # Yeni sohbet oluştur
+                            chat = create_chat(
+                                db, 
+                                request.chat_id, 
+                                last_chunk.get("backend_uuid", None), 
+                                last_chunk.get("context_uuid", None)
+                            )
+                            # Kullanıcı mesajını ekle
+                            add_message(db, request.chat_id, "user", request.query, file_names)
+                            # Asistan mesajını ekle
+                            add_message(
+                                db, 
+                                request.chat_id, 
+                                "assistant", 
+                                last_chunk["text"]["answer"] if "text" in last_chunk and "answer" in last_chunk["text"] else ""
+                            )
+                        else:
+                            # Mevcut sohbeti güncelle
+                            update_chat(
+                                db, 
+                                request.chat_id, 
+                                last_chunk.get("backend_uuid", None), 
+                                last_chunk.get("context_uuid", None)
+                            )
+                            # Kullanıcı mesajını ekle
+                            add_message(db, request.chat_id, "user", request.query, file_names)
+                            # Asistan mesajını ekle
+                            add_message(
+                                db, 
+                                request.chat_id, 
+                                "assistant", 
+                                last_chunk["text"]["answer"] if "text" in last_chunk and "answer" in last_chunk["text"] else ""
+                            )
             
             return StreamingResponse(generate(), media_type="application/x-ndjson")
         else:
@@ -504,6 +808,58 @@ async def query_with_files(request: QueryRequestWithFiles):
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e), "type": str(type(e))})
 
+# Mevcut sohbetleri listele
+@app.get("/chats")
+async def list_chats(skip: int = 0, limit: int = 100):
+    with get_db() as db:
+        chats = get_all_chats(db, skip, limit)
+        result = {}
+        
+        for chat in chats:
+            messages = get_chat_messages(db, chat.id)
+            result[chat.id] = {
+                "message_count": len(messages),
+                "messages": [{"role": msg.role, "content": msg.content, "files": msg.files} for msg in messages],
+                "backend_uuid": chat.backend_uuid,
+                "context_uuid": chat.context_uuid,
+                "created_at": chat.created_at.isoformat(),
+                "updated_at": chat.updated_at.isoformat()
+            }
+        
+        return JSONResponse(content=result)
+
+# Belirli bir sohbeti görüntüle
+@app.get("/chats/{chat_id}")
+async def get_chat(chat_id: str):
+    with get_db() as db:
+        chat = get_chat_by_id(db, chat_id)
+        
+        if chat:
+            messages = get_chat_messages(db, chat_id)
+            result = {
+                "id": chat.id,
+                "messages": [{"role": msg.role, "content": msg.content, "files": msg.files} for msg in messages],
+                "backend_uuid": chat.backend_uuid,
+                "context_uuid": chat.context_uuid,
+                "created_at": chat.created_at.isoformat(),
+                "updated_at": chat.updated_at.isoformat()
+            }
+            return JSONResponse(content=result)
+        
+        return JSONResponse(status_code=404, content={"error": "Chat not found"})
+
+# Belirli bir sohbeti sil
+@app.delete("/chats/{chat_id}")
+async def delete_chat(chat_id: str):
+    with get_db() as db:
+        success = delete_chat_by_id(db, chat_id)
+        
+        if success:
+            return JSONResponse(content={"message": f"Chat {chat_id} deleted successfully"})
+        
+        return JSONResponse(status_code=404, content={"error": "Chat not found"})
+
 # Doğrudan çalıştırma için
 if __name__ == "__main__":
-    uvicorn.run("client:app", host="0.0.0.0", port=8000, reload=True)
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run("client:app", host="0.0.0.0", port=port, reload=True)
