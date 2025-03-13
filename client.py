@@ -325,6 +325,8 @@ class QueryRequest(BaseModel):
     language: str = "en-US"
     incognito: bool = False
     stream: bool = False
+    cookies: Dict[str, str] = {}
+    headers: Dict[str, str] = {}
 
 class FileData(BaseModel):
     filename: str
@@ -333,10 +335,57 @@ class FileData(BaseModel):
 class QueryRequestWithFiles(QueryRequest):
     files: List[FileData] = []
 
-# Küresel client nesnesi
-perplexity_client = None
-cookies = None
-headers = None
+# Varsayılan cookie ve header bilgileri
+DEFAULT_COOKIES = {
+    'pplx.welcome-back-gate-impressions': '4',
+    'pplx.visitor-id': '0c977904-17cd-4dd5-a592-c4e3524a62ea',
+    '__cflb': '02DiuDyvFMmK5p9jVbVnMNSKYZhUL9aGmrcqeXMScWv1z',
+    '__podscribe_perplexityai_referrer': 'https://accounts.google.com/',
+    '__podscribe_perplexityai_landing_url': 'https://www.perplexity.ai/?login-source=signupButton&login-new=true',
+    '_fbp': 'fb.1.1741860500363.754976730684619743',
+    'intercom-device-id-l2wyozh0': '54d474e4-ab32-48aa-aec4-df76de9a2197',
+    'pplx.trackingAllowed': 'true',
+    '_gcl_au': '1.1.383922571.1741860520',
+    'pplx.unified-engine-tooltip-shown': 'true',
+    'pplx.deep-research-tooltip-impressions': '3',
+    'IndrX2c1OFdjNG9oXzgxd1JocUVVWGFadkNMVEZaYlkzeGRCUlRlR1JldWhCX2Fub255bW91c1VzZXJJZCI%3D': 'ImFjODM1NGI3LTkzNTUtNDBlZC1hNDQ4LTM3YTk3NmVhNzkwYSI=',
+    'pplx.search-models': '{%22pro%22:%22claude2%22}',
+    'pplx.session-id': 'ba020254-5dbe-4ae2-871b-8a53c6f36f9b',
+    'next-auth.csrf-token': '66938a2453456767a04f1e361302f61c43325a0b620af716692d17d680e9b737%7Cf7952ba6e42096b95d7512a9281b24deb409e74a3de7980f1ce0988188e7a9ea',
+    'pplx.is-enterprise-ad-dismissed': 'true',
+    'next-auth.callback-url': 'https%3A%2F%2Fwww.perplexity.ai%2Fapi%2Fauth%2Fsignin-callback%3Fredirect%3Dhttps%253A%252F%252Fwww.perplexity.ai',
+    'cf_clearance': 'NQlbg9t1j3jgppoPVJmHsS.8AyF2h94Zsj4tltnI6XI-1741886951-1.2.1.1-chx1naofSgda6caNatjNJW1RsXGNaEofek9o.BGNNqwQzmyzD8DS1orCV9e.tPz9gLASUvWje.7JtXq3JYL1ajnkAY_60BMcUXVuaxv1ThbTAz316IdFLOz.utWmfrZwqEfXfrCJhNF3KdmDY4JuNDkm5ktqiNBsjarBG56bMIHpCg4kZB.4pRm0hjOepP7kvR8hb_Od3QcHVwb8mVKBJuSMt1pQP.UlvGSPo8wVSHZA31mboxHJczMWkzaWPH.HHW4Tw9m6Hants8NRn2XDy9Z7PsiejqrvRgFPWKbjOWHYAvLQZQhD0qYlPsE.gidMez2SXJQB3tTHwMt1bTgz8qgp7aGFXv.3T_AWuBGoAMY',
+    'pplx.search-mode': 'pro',
+    'pplx.metadata': '{%22qc%22:10%2C%22qcu%22:5%2C%22qcm%22:0%2C%22qcc%22:4%2C%22qcr%22:0%2C%22qcdr%22:0%2C%22qcd%22:0%2C%22hli%22:true%2C%22hcga%22:true%2C%22hcds%22:false%2C%22hso%22:true%2C%22hfo%22:true}',
+    '_rdt_uuid': '1741860500402.008516c9-6373-466b-8759-0df7ed2582ed',
+    '__cf_bm': '9Hps3a91Pgya8br3OK.R8BJAPoDiSr7QHj9.7CAjWLs-1741887435-1.0.1.1-Q5eqSh9xQ4ACtbdi1E5wmGommKwqtfeyDO6JYjZum1okOdMBNweWerHkG3MsobpHNtLwXLATvLyiYcpP61xdIrcyyGhWGcEukdCbnh3oV_U',
+    'AWSALB': 'Ji0/h0sAivREUvDnmrSBhviCuoQPtahXXceL9cZ+gTKQL6VJkDifUee7Jo2OOQvfbyXk0FtodZtspQ1BBpRWrX8mO04Va/qa5C6OE8Y2v9dpDwBQ+R8ES1Xq4PZ+DFmX2LnX4T1mYR57ZRwttVU47QC0GsbaYhTyfzjeZIn2qo/Rh3edtLGB2Mbcou0lEw==',
+    'AWSALBCORS': 'Ji0/h0sAivREUvDnmrSBhviCuoQPtahXXceL9cZ+gTKQL6VJkDifUee7Jo2OOQvfbyXk0FtodZtspQ1BBpRWrX8mO04Va/qa5C6OE8Y2v9dpDwBQ+R8ES1Xq4PZ+DFmX2LnX4T1mYR57ZRwttVU47QC0GsbaYhTyfzjeZIn2qo/Rh3edtLGB2Mbcou0lEw==',
+    '__Secure-next-auth.session-token': 'eyJhbGciOiJkaXIiLCJlbmMiOiJBMjU2R0NNIn0..vXbL4smoTiAG9YIa.uPeGNUtQ0FFP2m4wISg804Abb71RvJvBcQpfQ9KuQgm86LAX1JsPrc74edW4flOnZMBPAiNBx_bXhLD-yKFSlkyt2EudYRr2fUOJnXjPI7w8irbTwzT6EZsGKAENLe-0Cl6LNSJ0I64pMxVSTJyzWeV8mq0AGzuY6narvyZiGeQqKMgXdaR36760BMBUBSTltY3P4iNG4-ASj7c97CnSKDJlTPf-25Xs7LsUX72BqCsz_eAGWKwuqsa4hubOUf7zYTtemHsht_wSBTJtbEZSuMx9lIHQkpku693znMRkuohycpiR5DiVpSTt0pygcriYfZtbqX4GmHtzc0xGuocr-JKdv5nxiTNa448svvm68WmbUq7uLpvzhYrGxabGFiPrPSo.qwig2Y-hMqU_jKKM2l0SGg',
+    '_dd_s': 'aid=0ed0bd48-7abb-42da-b8a2-229a11a1cf4c&rum=2&id=259aad17-663e-448f-8f96-a6f55ac2e407&created=1741884620482&expire=1741888430872&logs=1',
+}
+
+DEFAULT_HEADERS = {
+    'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+    'accept-language': 'tr,en-US;q=0.9,en;q=0.8,zh-CN;q=0.7,zh;q=0.6',
+    'cache-control': 'max-age=0',
+    'priority': 'u=0, i',
+    'sec-ch-ua': '"Chromium";v="134", "Not:A-Brand";v="24", "Google Chrome";v="134"',
+    'sec-ch-ua-arch': '"x86"',
+    'sec-ch-ua-bitness': '"64"',
+    'sec-ch-ua-full-version': '"134.0.6998.89"',
+    'sec-ch-ua-full-version-list': '"Chromium";v="134.0.6998.89", "Not:A-Brand";v="24.0.0.0", "Google Chrome";v="134.0.6998.89"',
+    'sec-ch-ua-mobile': '?0',
+    'sec-ch-ua-model': '""',
+    'sec-ch-ua-platform': '"Windows"',
+    'sec-ch-ua-platform-version': '"10.0.0"',
+    'sec-fetch-dest': 'document',
+    'sec-fetch-mode': 'navigate',
+    'sec-fetch-site': 'same-origin',
+    'sec-fetch-user': '?1',
+    'upgrade-insecure-requests': '1',
+    'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36',
+}
 
 # FastAPI uygulaması
 app = FastAPI(title="Perplexity API Server", description="Perplexity AI API'sine erişim sağlayan yerel API sunucusu")
@@ -349,141 +398,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# Uygulama başlangıcında client'ı bir kez oluştur
-@app.on_event("startup")
-async def startup_event():
-    global perplexity_client, cookies, headers
-    
-    # Cookie bilgilerini ayarla (kendi cookie'lerinizi ekleyin)
-    cookies = {
-        'pplx.welcome-back-gate-impressions': '4',
-        'pplx.visitor-id': '0c977904-17cd-4dd5-a592-c4e3524a62ea',
-        '__cflb': '02DiuDyvFMmK5p9jVbVnMNSKYZhUL9aGmrcqeXMScWv1z',
-        '__podscribe_perplexityai_referrer': 'https://accounts.google.com/',
-        '__podscribe_perplexityai_landing_url': 'https://www.perplexity.ai/?login-source=signupButton&login-new=true',
-        '_fbp': 'fb.1.1741860500363.754976730684619743',
-        'intercom-device-id-l2wyozh0': '54d474e4-ab32-48aa-aec4-df76de9a2197',
-        'pplx.trackingAllowed': 'true',
-        '_gcl_au': '1.1.383922571.1741860520',
-        'pplx.unified-engine-tooltip-shown': 'true',
-        'pplx.deep-research-tooltip-impressions': '3',
-        'IndrX2c1OFdjNG9oXzgxd1JocUVVWGFadkNMVEZaYlkzeGRCUlRlR1JldWhCX2Fub255bW91c1VzZXJJZCI%3D': 'ImFjODM1NGI3LTkzNTUtNDBlZC1hNDQ4LTM3YTk3NmVhNzkwYSI=',
-        'pplx.search-models': '{%22pro%22:%22claude2%22}',
-        'pplx.session-id': 'ba020254-5dbe-4ae2-871b-8a53c6f36f9b',
-        'next-auth.csrf-token': '66938a2453456767a04f1e361302f61c43325a0b620af716692d17d680e9b737%7Cf7952ba6e42096b95d7512a9281b24deb409e74a3de7980f1ce0988188e7a9ea',
-        'pplx.is-enterprise-ad-dismissed': 'true',
-        'next-auth.callback-url': 'https%3A%2F%2Fwww.perplexity.ai%2Fapi%2Fauth%2Fsignin-callback%3Fredirect%3Dhttps%253A%252F%252Fwww.perplexity.ai',
-        'cf_clearance': 'NQlbg9t1j3jgppoPVJmHsS.8AyF2h94Zsj4tltnI6XI-1741886951-1.2.1.1-chx1naofSgda6caNatjNJW1RsXGNaEofek9o.BGNNqwQzmyzD8DS1orCV9e.tPz9gLASUvWje.7JtXq3JYL1ajnkAY_60BMcUXVuaxv1ThbTAz316IdFLOz.utWmfrZwqEfXfrCJhNF3KdmDY4JuNDkm5ktqiNBsjarBG56bMIHpCg4kZB.4pRm0hjOepP7kvR8hb_Od3QcHVwb8mVKBJuSMt1pQP.UlvGSPo8wVSHZA31mboxHJczMWkzaWPH.HHW4Tw9m6Hants8NRn2XDy9Z7PsiejqrvRgFPWKbjOWHYAvLQZQhD0qYlPsE.gidMez2SXJQB3tTHwMt1bTgz8qgp7aGFXv.3T_AWuBGoAMY',
-        'pplx.search-mode': 'pro',
-        'pplx.metadata': '{%22qc%22:10%2C%22qcu%22:5%2C%22qcm%22:0%2C%22qcc%22:4%2C%22qcr%22:0%2C%22qcdr%22:0%2C%22qcd%22:0%2C%22hli%22:true%2C%22hcga%22:true%2C%22hcds%22:false%2C%22hso%22:true%2C%22hfo%22:true}',
-        '_rdt_uuid': '1741860500402.008516c9-6373-466b-8759-0df7ed2582ed',
-        '__cf_bm': '9Hps3a91Pgya8br3OK.R8BJAPoDiSr7QHj9.7CAjWLs-1741887435-1.0.1.1-Q5eqSh9xQ4ACtbdi1E5wmGommKwqtfeyDO6JYjZum1okOdMBNweWerHkG3MsobpHNtLwXLATvLyiYcpP61xdIrcyyGhWGcEukdCbnh3oV_U',
-        'AWSALB': 'Ji0/h0sAivREUvDnmrSBhviCuoQPtahXXceL9cZ+gTKQL6VJkDifUee7Jo2OOQvfbyXk0FtodZtspQ1BBpRWrX8mO04Va/qa5C6OE8Y2v9dpDwBQ+R8ES1Xq4PZ+DFmX2LnX4T1mYR57ZRwttVU47QC0GsbaYhTyfzjeZIn2qo/Rh3edtLGB2Mbcou0lEw==',
-        'AWSALBCORS': 'Ji0/h0sAivREUvDnmrSBhviCuoQPtahXXceL9cZ+gTKQL6VJkDifUee7Jo2OOQvfbyXk0FtodZtspQ1BBpRWrX8mO04Va/qa5C6OE8Y2v9dpDwBQ+R8ES1Xq4PZ+DFmX2LnX4T1mYR57ZRwttVU47QC0GsbaYhTyfzjeZIn2qo/Rh3edtLGB2Mbcou0lEw==',
-        '__Secure-next-auth.session-token': 'eyJhbGciOiJkaXIiLCJlbmMiOiJBMjU2R0NNIn0..vXbL4smoTiAG9YIa.uPeGNUtQ0FFP2m4wISg804Abb71RvJvBcQpfQ9KuQgm86LAX1JsPrc74edW4flOnZMBPAiNBx_bXhLD-yKFSlkyt2EudYRr2fUOJnXjPI7w8irbTwzT6EZsGKAENLe-0Cl6LNSJ0I64pMxVSTJyzWeV8mq0AGzuY6narvyZiGeQqKMgXdaR36760BMBUBSTltY3P4iNG4-ASj7c97CnSKDJlTPf-25Xs7LsUX72BqCsz_eAGWKwuqsa4hubOUf7zYTtemHsht_wSBTJtbEZSuMx9lIHQkpku693znMRkuohycpiR5DiVpSTt0pygcriYfZtbqX4GmHtzc0xGuocr-JKdv5nxiTNa448svvm68WmbUq7uLpvzhYrGxabGFiPrPSo.qwig2Y-hMqU_jKKM2l0SGg',
-        '_dd_s': 'aid=0ed0bd48-7abb-42da-b8a2-229a11a1cf4c&rum=2&id=259aad17-663e-448f-8f96-a6f55ac2e407&created=1741884620482&expire=1741888430872&logs=1',
-    }
-
-    # Header bilgilerini ayarla
-    headers = {
-        'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-        'accept-language': 'tr,en-US;q=0.9,en;q=0.8,zh-CN;q=0.7,zh;q=0.6',
-        'cache-control': 'max-age=0',
-        'priority': 'u=0, i',
-        'sec-ch-ua': '"Chromium";v="134", "Not:A-Brand";v="24", "Google Chrome";v="134"',
-        'sec-ch-ua-arch': '"x86"',
-        'sec-ch-ua-bitness': '"64"',
-        'sec-ch-ua-full-version': '"134.0.6998.89"',
-        'sec-ch-ua-full-version-list': '"Chromium";v="134.0.6998.89", "Not:A-Brand";v="24.0.0.0", "Google Chrome";v="134.0.6998.89"',
-        'sec-ch-ua-mobile': '?0',
-        'sec-ch-ua-model': '""',
-        'sec-ch-ua-platform': '"Windows"',
-        'sec-ch-ua-platform-version': '"10.0.0"',
-        'sec-fetch-dest': 'document',
-        'sec-fetch-mode': 'navigate',
-        'sec-fetch-site': 'same-origin',
-        'sec-fetch-user': '?1',
-        'upgrade-insecure-requests': '1',
-        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36',
-    }
-    
-    # Client'ı başlat
-    perplexity_client = await Client(cookies=cookies, headers=headers)
-    print("🚀 Perplexity API Client başlatıldı!")
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    # Uygulama kapanırken gerekli kaynakları serbest bırakın
-    global perplexity_client
-    if perplexity_client:
-        if hasattr(perplexity_client, 'ws') and perplexity_client.ws:
-            perplexity_client.ws.close()
-        perplexity_client = None
-
-# Normal sorgu endpoint'i (dosya olmadan)
-@app.post("/query")
-async def query(request: QueryRequest):
-    try:
-        result = await perplexity_client.search(
-            query=request.query,
-            mode=request.mode,
-            model=request.model,
-            sources=request.sources,
-            language=request.language,
-            incognito=request.incognito,
-            stream=request.stream
-        )
-        
-        if request.stream:
-            # Streaming yanıt için
-            async def generate():
-                async for chunk in result:
-                    yield json.dumps(chunk) + "\n"
-            
-            return StreamingResponse(generate(), media_type="application/x-ndjson")
-        else:
-            # Normal yanıt için
-            return JSONResponse(content=result)
-    
-    except Exception as e:
-        return JSONResponse(status_code=500, content={"error": str(e)})
-
-# Dosya içeren sorgu endpoint'i
-@app.post("/query_with_files")
-async def query_with_files(request: QueryRequestWithFiles):
-    try:
-        files = {}
-        
-        # Base64 kodlu dosyaları çöz
-        for file_data in request.files:
-            file_content = base64.b64decode(file_data.content)
-            files[file_data.filename] = file_content
-        
-        result = await perplexity_client.search(
-            query=request.query,
-            mode=request.mode,
-            model=request.model,
-            sources=request.sources,
-            language=request.language,
-            incognito=request.incognito,
-            stream=request.stream,
-            files=files
-        )
-        
-        if request.stream:
-            # Streaming yanıt için
-            async def generate():
-                async for chunk in result:
-                    yield json.dumps(chunk) + "\n"
-            
-            return StreamingResponse(generate(), media_type="application/x-ndjson")
-        else:
-            # Normal yanıt için
-            return JSONResponse(content=result)
-    
-    except Exception as e:
-        return JSONResponse(status_code=500, content={"error": str(e)})
 
 # Ana sayfa route'u
 @app.get("/")
@@ -503,6 +417,92 @@ async def root():
             }
         ]
     }
+
+# Normal sorgu endpoint'i (dosya olmadan)
+@app.post("/query")
+async def query(request: QueryRequest):
+    try:
+        # İstek için özel cookie ve header bilgileri
+        cookies_to_use = request.cookies if request.cookies else DEFAULT_COOKIES
+        headers_to_use = request.headers if request.headers else DEFAULT_HEADERS
+        
+        # Her istek için yeni bir client oluştur
+        client = await Client(cookies=cookies_to_use, headers=headers_to_use)
+        
+        result = await client.search(
+            query=request.query,
+            mode=request.mode,
+            model=request.model,
+            sources=request.sources,
+            language=request.language,
+            incognito=request.incognito,
+            stream=request.stream
+        )
+        
+        # İşlem bittikten sonra websocket bağlantısını kapat
+        if hasattr(client, 'ws') and client.ws:
+            client.ws.close()
+        
+        if request.stream:
+            # Streaming yanıt için
+            async def generate():
+                async for chunk in result:
+                    yield json.dumps(chunk) + "\n"
+            
+            return StreamingResponse(generate(), media_type="application/x-ndjson")
+        else:
+            # Normal yanıt için
+            return JSONResponse(content=result)
+    
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e), "type": str(type(e))})
+
+# Dosya içeren sorgu endpoint'i
+@app.post("/query_with_files")
+async def query_with_files(request: QueryRequestWithFiles):
+    try:
+        # İstek için özel cookie ve header bilgileri
+        cookies_to_use = request.cookies if request.cookies else DEFAULT_COOKIES
+        headers_to_use = request.headers if request.headers else DEFAULT_HEADERS
+        
+        # Her istek için yeni bir client oluştur
+        client = await Client(cookies=cookies_to_use, headers=headers_to_use)
+        
+        files = {}
+        
+        # Base64 kodlu dosyaları çöz
+        for file_data in request.files:
+            file_content = base64.b64decode(file_data.content)
+            files[file_data.filename] = file_content
+        
+        result = await client.search(
+            query=request.query,
+            mode=request.mode,
+            model=request.model,
+            sources=request.sources,
+            language=request.language,
+            incognito=request.incognito,
+            stream=request.stream,
+            files=files
+        )
+        
+        # İşlem bittikten sonra websocket bağlantısını kapat
+        if hasattr(client, 'ws') and client.ws:
+            client.ws.close()
+        
+        if request.stream:
+            # Streaming yanıt için
+            async def generate():
+                async for chunk in result:
+                    yield json.dumps(chunk) + "\n"
+            
+            return StreamingResponse(generate(), media_type="application/x-ndjson")
+        else:
+            # Normal yanıt için
+            return JSONResponse(content=result)
+    
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e), "type": str(type(e))})
 
 # Doğrudan çalıştırma için
 if __name__ == "__main__":
