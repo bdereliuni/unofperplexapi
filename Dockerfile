@@ -25,4 +25,4 @@ COPY . .
 ENV PORT=8000
 
 # Uygulamayı çalıştır (shell formu ile)
-CMD ["sh", "-c", "uvicorn client:app --host 0.0.0.0 --port 8080"]
+CMD ["sh", "-c", "uvicorn client:app --host 0.0.0.0 --port $PORT"]

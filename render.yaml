@@ -3,7 +3,7 @@ services:
     name: perplexity-api
     runtime: python
     buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn client:app --host 0.0.0.0 --port $PORT
+    startCommand: python start.py
     envVars:
       - key: PYTHON_VERSION
         value: 3.10.0 
