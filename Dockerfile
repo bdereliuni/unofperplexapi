@@ -6,7 +6,13 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y \
     build-essential \
     curl \
+    libssl-dev \
+    libffi-dev \
+    python3-dev \
     && rm -rf /var/lib/apt/lists/*
+
+# pip'i güncelle
+RUN pip install --no-cache-dir --upgrade pip
 
 # Python bağımlılıklarını kopyala ve yükle
 COPY requirements.txt .
@@ -19,4 +25,4 @@ COPY . .
 ENV PORT=8000
 
 # Uygulamayı çalıştır
-CMD ["uvicorn", "client:app", "--host", "0.0.0.0", "--port", "8000"] 
+CMD uvicorn client:app --host 0.0.0.0 --port ${PORT} 
