@@ -24,5 +24,5 @@ COPY . .
 # Port ayarı
 ENV PORT=8000
 
-# Uygulamayı çalıştır (shell formu ile)
-CMD ["sh", "-c", "uvicorn client:app --host 0.0.0.0 --port $PORT"]
+# Uygulamayı çalıştır (inline Python komutu ile)
+CMD ["python", "-c", "import os; import uvicorn; port = int(os.environ.get('PORT', '8000')); uvicorn.run('client:app', host='0.0.0.0', port=port)"]

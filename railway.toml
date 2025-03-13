@@ -1,0 +1,8 @@
+[build]
+builder = "nixpacks"
+buildCommand = "pip install -r requirements.txt"
+
+[deploy]
+startCommand = "python -c \"import os; import uvicorn; port = int(os.environ.get('PORT', '8080')); uvicorn.run('client:app', host='0.0.0.0', port=port)\""
+restartPolicyType = "on_failure"
+restartPolicyMaxRetries = 3
