@@ -24,5 +24,5 @@ COPY . .
 # Port ayarı
 ENV PORT=8000
 
-# Uygulamayı çalıştır
-CMD ["python", "start.py"] 
+# Uygulamayı çalıştır (shell formu ile)
+CMD ["sh", "-c", "uvicorn client:app --host 0.0.0.0 --port $PORT"]
