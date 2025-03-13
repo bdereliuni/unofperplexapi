@@ -9,24 +9,18 @@ from uuid import uuid4
 from threading import Thread
 from curl_cffi import requests, CurlMime
 from websocket import WebSocketApp
+import os
+from dotenv import load_dotenv
+from supabase import create_client, Client as SupabaseClient
 
 # FastAPI için gerekli kütüphaneler
-from fastapi import FastAPI, UploadFile, File, Form, BackgroundTasks, Depends
+from fastapi import FastAPI, UploadFile, File, Form, BackgroundTasks
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 from typing import List, Dict, Optional, Any
 from pydantic import BaseModel
 import base64
-import os
-
-# Veritabanı için eklemeler
-from sqlalchemy import create_engine, Column, String, JSON, Integer, Text, DateTime, ForeignKey
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker, Session, relationship
-from sqlalchemy.sql import func
-from contextlib import contextmanager
-import datetime
 
 try:
     from .emailnator import Emailnator
@@ -35,50 +29,14 @@ except ImportError:
     class Emailnator:
         pass
 
-# Veritabanı bağlantısını yapılandırma
-DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///./chats.db")
-if DATABASE_URL.startswith("postgres://"):
-    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+# Supabase bağlantısı
+SUPABASE_URL = "https://qkultjnhljzolxrybrdx.supabase.co"
+SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFrdWx0am5obGp6b2x4cnlicmR4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDE4ODgzNzMsImV4cCI6MjA1NzQ2NDM3M30.h31De44EJbQ9b3wicjJ2VGiWF9AMdeVClIT52jqrfKA"
 
-engine = create_engine(DATABASE_URL)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-Base = declarative_base()
+supabase: SupabaseClient = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# Veritabanı modelleri
-class Chat(Base):
-    __tablename__ = "chats"
-    
-    id = Column(String, primary_key=True, index=True)
-    backend_uuid = Column(String, index=True, nullable=True)
-    context_uuid = Column(String, index=True, nullable=True)
-    created_at = Column(DateTime, server_default=func.now())
-    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
-    
-    messages = relationship("Message", back_populates="chat", cascade="all, delete-orphan")
-
-class Message(Base):
-    __tablename__ = "messages"
-    
-    id = Column(Integer, primary_key=True, index=True)
-    chat_id = Column(String, ForeignKey("chats.id"))
-    role = Column(String, index=True)  # "user" veya "assistant"
-    content = Column(Text)
-    files = Column(JSON, nullable=True)
-    created_at = Column(DateTime, server_default=func.now())
-    
-    chat = relationship("Chat", back_populates="messages")
-
-# Veritabanı tabloları oluştur
-Base.metadata.create_all(bind=engine)
-
-# Veritabanı bağlantı yöneticisi
-@contextmanager
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+# Sohbetleri saklamak için bir sözlük 
+chat_store = {}
 
 class AsyncMixin:
     def __init__(self, *args, **kwargs):
@@ -369,50 +327,6 @@ class Client(AsyncMixin):
                 return chunks[-1]
 
 
-# Veritabanı işlemleri için yardımcı fonksiyonlar
-def get_chat_by_id(db: Session, chat_id: str):
-    return db.query(Chat).filter(Chat.id == chat_id).first()
-
-def create_chat(db: Session, chat_id: str, backend_uuid: str = None, context_uuid: str = None):
-    chat = Chat(id=chat_id, backend_uuid=backend_uuid, context_uuid=context_uuid)
-    db.add(chat)
-    db.commit()
-    db.refresh(chat)
-    return chat
-
-def add_message(db: Session, chat_id: str, role: str, content: str, files=None):
-    message = Message(chat_id=chat_id, role=role, content=content, files=files)
-    db.add(message)
-    db.commit()
-    db.refresh(message)
-    return message
-
-def update_chat(db: Session, chat_id: str, backend_uuid: str = None, context_uuid: str = None):
-    chat = get_chat_by_id(db, chat_id)
-    if chat:
-        if backend_uuid:
-            chat.backend_uuid = backend_uuid
-        if context_uuid:
-            chat.context_uuid = context_uuid
-        chat.updated_at = datetime.datetime.now()
-        db.commit()
-        db.refresh(chat)
-    return chat
-
-def delete_chat_by_id(db: Session, chat_id: str):
-    chat = get_chat_by_id(db, chat_id)
-    if chat:
-        db.delete(chat)
-        db.commit()
-        return True
-    return False
-
-def get_all_chats(db: Session, skip: int = 0, limit: int = 100):
-    return db.query(Chat).offset(skip).limit(limit).all()
-
-def get_chat_messages(db: Session, chat_id: str):
-    return db.query(Message).filter(Message.chat_id == chat_id).order_by(Message.created_at).all()
-
 # FastAPI modelleri
 class QueryRequest(BaseModel):
     query: str
@@ -486,7 +400,7 @@ DEFAULT_HEADERS = {
 }
 
 # FastAPI uygulaması
-app = FastAPI(title="Perplexity API Server", description="Perplexity AI API'sine erişim sağlayan API sunucusu")
+app = FastAPI(title="Perplexity API Server", description="Perplexity AI API'sine erişim sağlayan yerel API sunucusu")
 
 # CORS ayarları
 app.add_middleware(
@@ -534,19 +448,21 @@ async def query(request: QueryRequest):
         
         # Chat ID kontrolü ve follow-up hazırlama
         follow_up = None
+        chat_data = None
         
-        with get_db() as db:
-            # Eğer chat_id verilmişse
-            if request.chat_id:
-                # Veritabanından chat'i kontrol et
-                chat = get_chat_by_id(db, request.chat_id)
-                
-                if chat:
-                    # Var olan sohbeti devam ettir
+        # Eğer chat_id verilmişse
+        if request.chat_id:
+            try:
+                # Supabase'den chat verilerini çek
+                response = supabase.table('chats').select('*').eq('chat_id', request.chat_id).execute()
+                if response.data:
+                    chat_data = response.data[0]
                     follow_up = {
-                        "backend_uuid": chat.backend_uuid,
+                        "backend_uuid": chat_data["backend_uuid"],
                         "attachments": []
                     }
+            except Exception as e:
+                print(f"Supabase chat veri çekme hatası: {str(e)}")
         
         result = await client.search(
             query=request.query,
@@ -563,45 +479,39 @@ async def query(request: QueryRequest):
         if hasattr(client, 'ws') and client.ws:
             client.ws.close()
         
-        # Sonucu veritabanına kaydet
+        # Sonucu Supabase'e kaydet
         if request.chat_id and not request.stream:
-            with get_db() as db:
-                chat = get_chat_by_id(db, request.chat_id)
-                
-                if not chat:
+            try:
+                if not chat_data:
                     # Yeni sohbet oluştur
-                    chat = create_chat(
-                        db, 
-                        request.chat_id, 
-                        result.get("backend_uuid", None), 
-                        result.get("context_uuid", None)
-                    )
-                    # Kullanıcı mesajını ekle
-                    add_message(db, request.chat_id, "user", request.query)
-                    # Asistan mesajını ekle
-                    add_message(
-                        db, 
-                        request.chat_id, 
-                        "assistant", 
-                        result["text"]["answer"] if "text" in result and "answer" in result["text"] else ""
-                    )
+                    chat_data = {
+                        'chat_id': request.chat_id,
+                        'messages': [
+                            {"role": "user", "content": request.query},
+                            {"role": "assistant", "content": result["text"]["answer"] if "text" in result and "answer" in result["text"] else ""}
+                        ],
+                        'backend_uuid': result.get("backend_uuid", None),
+                        'context_uuid': result.get("context_uuid", None),
+                        'last_response': result
+                    }
+                    supabase.table('chats').insert(chat_data).execute()
                 else:
                     # Mevcut sohbeti güncelle
-                    update_chat(
-                        db, 
-                        request.chat_id, 
-                        result.get("backend_uuid", None), 
-                        result.get("context_uuid", None)
-                    )
-                    # Kullanıcı mesajını ekle
-                    add_message(db, request.chat_id, "user", request.query)
-                    # Asistan mesajını ekle
-                    add_message(
-                        db, 
-                        request.chat_id, 
-                        "assistant", 
-                        result["text"]["answer"] if "text" in result and "answer" in result["text"] else ""
-                    )
+                    messages = chat_data.get('messages', [])
+                    messages.extend([
+                        {"role": "user", "content": request.query},
+                        {"role": "assistant", "content": result["text"]["answer"] if "text" in result and "answer" in result["text"] else ""}
+                    ])
+                    
+                    update_data = {
+                        'messages': messages,
+                        'backend_uuid': result.get("backend_uuid", None),
+                        'context_uuid': result.get("context_uuid", None),
+                        'last_response': result
+                    }
+                    supabase.table('chats').update(update_data).eq('chat_id', request.chat_id).execute()
+            except Exception as e:
+                print(f"Supabase veri kaydetme hatası: {str(e)}")
         
         if request.stream:
             # Streaming yanıt için
@@ -611,45 +521,41 @@ async def query(request: QueryRequest):
                     last_chunk = chunk
                     yield json.dumps(chunk) + "\n"
                 
-                # Stream'in sonunda veritabanını güncelle
+                # Stream'in sonunda Supabase'i güncelle
                 if request.chat_id and last_chunk:
-                    with get_db() as db:
-                        chat = get_chat_by_id(db, request.chat_id)
-                        
-                        if not chat:
+                    try:
+                        response = supabase.table('chats').select('*').eq('chat_id', request.chat_id).execute()
+                        if not response.data:
                             # Yeni sohbet oluştur
-                            chat = create_chat(
-                                db, 
-                                request.chat_id, 
-                                last_chunk.get("backend_uuid", None), 
-                                last_chunk.get("context_uuid", None)
-                            )
-                            # Kullanıcı mesajını ekle
-                            add_message(db, request.chat_id, "user", request.query)
-                            # Asistan mesajını ekle
-                            add_message(
-                                db, 
-                                request.chat_id, 
-                                "assistant", 
-                                last_chunk["text"]["answer"] if "text" in last_chunk and "answer" in last_chunk["text"] else ""
-                            )
+                            chat_data = {
+                                'chat_id': request.chat_id,
+                                'messages': [
+                                    {"role": "user", "content": request.query},
+                                    {"role": "assistant", "content": last_chunk["text"]["answer"] if "text" in last_chunk and "answer" in last_chunk["text"] else ""}
+                                ],
+                                'backend_uuid': last_chunk.get("backend_uuid", None),
+                                'context_uuid': last_chunk.get("context_uuid", None),
+                                'last_response': last_chunk
+                            }
+                            supabase.table('chats').insert(chat_data).execute()
                         else:
                             # Mevcut sohbeti güncelle
-                            update_chat(
-                                db, 
-                                request.chat_id, 
-                                last_chunk.get("backend_uuid", None), 
-                                last_chunk.get("context_uuid", None)
-                            )
-                            # Kullanıcı mesajını ekle
-                            add_message(db, request.chat_id, "user", request.query)
-                            # Asistan mesajını ekle
-                            add_message(
-                                db, 
-                                request.chat_id, 
-                                "assistant", 
-                                last_chunk["text"]["answer"] if "text" in last_chunk and "answer" in last_chunk["text"] else ""
-                            )
+                            existing_chat = response.data[0]
+                            messages = existing_chat.get('messages', [])
+                            messages.extend([
+                                {"role": "user", "content": request.query},
+                                {"role": "assistant", "content": last_chunk["text"]["answer"] if "text" in last_chunk and "answer" in last_chunk["text"] else ""}
+                            ])
+                            
+                            update_data = {
+                                'messages': messages,
+                                'backend_uuid': last_chunk.get("backend_uuid", None),
+                                'context_uuid': last_chunk.get("context_uuid", None),
+                                'last_response': last_chunk
+                            }
+                            supabase.table('chats').update(update_data).eq('chat_id', request.chat_id).execute()
+                    except Exception as e:
+                        print(f"Supabase stream veri kaydetme hatası: {str(e)}")
             
             return StreamingResponse(generate(), media_type="application/x-ndjson")
         else:
@@ -680,18 +586,15 @@ async def query_with_files(request: QueryRequestWithFiles):
         # Chat ID kontrolü ve follow-up hazırlama
         follow_up = None
         
-        with get_db() as db:
-            # Eğer chat_id verilmişse
-            if request.chat_id:
-                # Veritabanından chat'i kontrol et
-                chat = get_chat_by_id(db, request.chat_id)
-                
-                if chat:
-                    # Var olan sohbeti devam ettir
-                    follow_up = {
-                        "backend_uuid": chat.backend_uuid,
-                        "attachments": []
-                    }
+        # Eğer chat_id verilmişse
+        if request.chat_id:
+            if request.chat_id in chat_store:
+                # Var olan sohbeti devam ettir
+                chat_data = chat_store[request.chat_id]
+                follow_up = {
+                    "backend_uuid": chat_data["backend_uuid"],
+                    "attachments": []
+                }
         
         result = await client.search(
             query=request.query,
@@ -709,48 +612,24 @@ async def query_with_files(request: QueryRequestWithFiles):
         if hasattr(client, 'ws') and client.ws:
             client.ws.close()
         
-        # Dosya adlarını JSON formatına dönüştür
-        file_names = [f.filename for f in request.files]
-        
-        # Sonucu veritabanına kaydet
+        # Sonucu sakla
         if request.chat_id and not request.stream:
-            with get_db() as db:
-                chat = get_chat_by_id(db, request.chat_id)
-                
-                if not chat:
-                    # Yeni sohbet oluştur
-                    chat = create_chat(
-                        db, 
-                        request.chat_id, 
-                        result.get("backend_uuid", None), 
-                        result.get("context_uuid", None)
-                    )
-                    # Kullanıcı mesajını ekle
-                    add_message(db, request.chat_id, "user", request.query, file_names)
-                    # Asistan mesajını ekle
-                    add_message(
-                        db, 
-                        request.chat_id, 
-                        "assistant", 
-                        result["text"]["answer"] if "text" in result and "answer" in result["text"] else ""
-                    )
-                else:
-                    # Mevcut sohbeti güncelle
-                    update_chat(
-                        db, 
-                        request.chat_id, 
-                        result.get("backend_uuid", None), 
-                        result.get("context_uuid", None)
-                    )
-                    # Kullanıcı mesajını ekle
-                    add_message(db, request.chat_id, "user", request.query, file_names)
-                    # Asistan mesajını ekle
-                    add_message(
-                        db, 
-                        request.chat_id, 
-                        "assistant", 
-                        result["text"]["answer"] if "text" in result and "answer" in result["text"] else ""
-                    )
+            if request.chat_id not in chat_store:
+                chat_store[request.chat_id] = {
+                    "messages": [
+                        {"role": "user", "content": request.query, "files": [f.filename for f in request.files]},
+                        {"role": "assistant", "content": result["text"]["answer"] if "text" in result and "answer" in result["text"] else ""}
+                    ],
+                    "backend_uuid": result.get("backend_uuid", None),
+                    "context_uuid": result.get("context_uuid", None),
+                    "last_response": result
+                }
+            else:
+                chat_store[request.chat_id]["messages"].append({"role": "user", "content": request.query, "files": [f.filename for f in request.files]})
+                chat_store[request.chat_id]["messages"].append({"role": "assistant", "content": result["text"]["answer"] if "text" in result and "answer" in result["text"] else ""})
+                chat_store[request.chat_id]["backend_uuid"] = result.get("backend_uuid", None)
+                chat_store[request.chat_id]["context_uuid"] = result.get("context_uuid", None)
+                chat_store[request.chat_id]["last_response"] = result
         
         if request.stream:
             # Streaming yanıt için
@@ -760,45 +639,24 @@ async def query_with_files(request: QueryRequestWithFiles):
                     last_chunk = chunk
                     yield json.dumps(chunk) + "\n"
                 
-                # Stream'in sonunda veritabanını güncelle
+                # Stream'in sonunda chat_store'u güncelle
                 if request.chat_id and last_chunk:
-                    with get_db() as db:
-                        chat = get_chat_by_id(db, request.chat_id)
-                        
-                        if not chat:
-                            # Yeni sohbet oluştur
-                            chat = create_chat(
-                                db, 
-                                request.chat_id, 
-                                last_chunk.get("backend_uuid", None), 
-                                last_chunk.get("context_uuid", None)
-                            )
-                            # Kullanıcı mesajını ekle
-                            add_message(db, request.chat_id, "user", request.query, file_names)
-                            # Asistan mesajını ekle
-                            add_message(
-                                db, 
-                                request.chat_id, 
-                                "assistant", 
-                                last_chunk["text"]["answer"] if "text" in last_chunk and "answer" in last_chunk["text"] else ""
-                            )
-                        else:
-                            # Mevcut sohbeti güncelle
-                            update_chat(
-                                db, 
-                                request.chat_id, 
-                                last_chunk.get("backend_uuid", None), 
-                                last_chunk.get("context_uuid", None)
-                            )
-                            # Kullanıcı mesajını ekle
-                            add_message(db, request.chat_id, "user", request.query, file_names)
-                            # Asistan mesajını ekle
-                            add_message(
-                                db, 
-                                request.chat_id, 
-                                "assistant", 
-                                last_chunk["text"]["answer"] if "text" in last_chunk and "answer" in last_chunk["text"] else ""
-                            )
+                    if request.chat_id not in chat_store:
+                        chat_store[request.chat_id] = {
+                            "messages": [
+                                {"role": "user", "content": request.query, "files": [f.filename for f in request.files]},
+                                {"role": "assistant", "content": last_chunk["text"]["answer"] if "text" in last_chunk and "answer" in last_chunk["text"] else ""}
+                            ],
+                            "backend_uuid": last_chunk.get("backend_uuid", None),
+                            "context_uuid": last_chunk.get("context_uuid", None),
+                            "last_response": last_chunk
+                        }
+                    else:
+                        chat_store[request.chat_id]["messages"].append({"role": "user", "content": request.query, "files": [f.filename for f in request.files]})
+                        chat_store[request.chat_id]["messages"].append({"role": "assistant", "content": last_chunk["text"]["answer"] if "text" in last_chunk and "answer" in last_chunk["text"] else ""})
+                        chat_store[request.chat_id]["backend_uuid"] = last_chunk.get("backend_uuid", None)
+                        chat_store[request.chat_id]["context_uuid"] = last_chunk.get("context_uuid", None)
+                        chat_store[request.chat_id]["last_response"] = last_chunk
             
             return StreamingResponse(generate(), media_type="application/x-ndjson")
         else:
@@ -810,54 +668,42 @@ async def query_with_files(request: QueryRequestWithFiles):
 
 # Mevcut sohbetleri listele
 @app.get("/chats")
-async def list_chats(skip: int = 0, limit: int = 100):
-    with get_db() as db:
-        chats = get_all_chats(db, skip, limit)
-        result = {}
-        
-        for chat in chats:
-            messages = get_chat_messages(db, chat.id)
-            result[chat.id] = {
-                "message_count": len(messages),
-                "messages": [{"role": msg.role, "content": msg.content, "files": msg.files} for msg in messages],
-                "backend_uuid": chat.backend_uuid,
-                "context_uuid": chat.context_uuid,
-                "created_at": chat.created_at.isoformat(),
-                "updated_at": chat.updated_at.isoformat()
+async def list_chats():
+    try:
+        response = supabase.table('chats').select('*').execute()
+        chats = {}
+        for chat in response.data:
+            chats[chat['chat_id']] = {
+                "message_count": len(chat.get('messages', [])),
+                "messages": chat.get('messages', []),
+                "backend_uuid": chat.get('backend_uuid'),
+                "context_uuid": chat.get('context_uuid')
             }
-        
-        return JSONResponse(content=result)
+        return JSONResponse(content=chats)
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
 # Belirli bir sohbeti görüntüle
 @app.get("/chats/{chat_id}")
 async def get_chat(chat_id: str):
-    with get_db() as db:
-        chat = get_chat_by_id(db, chat_id)
-        
-        if chat:
-            messages = get_chat_messages(db, chat_id)
-            result = {
-                "id": chat.id,
-                "messages": [{"role": msg.role, "content": msg.content, "files": msg.files} for msg in messages],
-                "backend_uuid": chat.backend_uuid,
-                "context_uuid": chat.context_uuid,
-                "created_at": chat.created_at.isoformat(),
-                "updated_at": chat.updated_at.isoformat()
-            }
-            return JSONResponse(content=result)
-        
+    try:
+        response = supabase.table('chats').select('*').eq('chat_id', chat_id).execute()
+        if response.data:
+            return JSONResponse(content=response.data[0])
         return JSONResponse(status_code=404, content={"error": "Chat not found"})
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
 # Belirli bir sohbeti sil
 @app.delete("/chats/{chat_id}")
 async def delete_chat(chat_id: str):
-    with get_db() as db:
-        success = delete_chat_by_id(db, chat_id)
-        
-        if success:
+    try:
+        response = supabase.table('chats').delete().eq('chat_id', chat_id).execute()
+        if response.data:
             return JSONResponse(content={"message": f"Chat {chat_id} deleted successfully"})
-        
         return JSONResponse(status_code=404, content={"error": "Chat not found"})
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
 # Doğrudan çalıştırma için
 if __name__ == "__main__":

@@ -4,6 +4,5 @@ pydantic==2.3.0
 curl-cffi==0.5.7
 websocket-client==1.6.3
 python-multipart==0.0.6
-sqlalchemy==2.0.23
-psycopg2-binary==2.9.9
-alembic==1.12.1 
+supabase-py==2.3.5
+python-dotenv==1.0.1 
