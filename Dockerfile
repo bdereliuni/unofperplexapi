@@ -18,10 +18,6 @@ RUN pip install --no-cache-dir --upgrade pip
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Başlangıç scriptini kopyala ve çalıştırılabilir yap
-COPY start.sh .
-RUN chmod +x start.sh
-
 # Uygulama kodunu kopyala
 COPY . .
 
@@ -29,4 +25,4 @@ COPY . .
 ENV PORT=8000
 
 # Uygulamayı çalıştır
-CMD ["./start.sh"] 
+CMD ["python", "start.py"] 
